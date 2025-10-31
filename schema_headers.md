@@ -7,6 +7,9 @@ Copy these into the respective tabs in your Google Sheet.
 user_id,display_name,timezone,google_calendar_id,created_at,last_modified
 ```
 
+**Notes:**
+- `timezone`: User's timezone (e.g., `America/New_York`, `Europe/Vienna`, `America/Los_Angeles`). Used for displaying timestamps to the user and for calendar events. Defaults to app's `TIMEZONE` config if not set.
+
 example row:
 ```
 Michael.Test,Michael (Test),America/New_York,,2025-10-30T09:00:00Z,2025-10-30T09:00:00Z
@@ -36,14 +39,16 @@ morning_test_001,3,Gratitude,Mind,5,Three gratitudes,2025-10-30T09:06:00Z
 
 ## practice_entries
 ```
-entry_group_id,user_id,routine_id,item_name,category,started_at,ended_at,notes,cal_event_id,created_at
+entry_id,user_id,routine_id,item_name,category,started_at,ended_at,notes,cal_event_id,created_at
 ```
 
 (Leave empty; the app writes rows here.)
 
 **Notes:**
-- `entry_group_id`: Groups all rows from one session/routine launch (e.g., "Michael.Test_20251031_045541")
-- `started_at`: Timestamp when step started or "Launch" row created
-- `ended_at`: Timestamp when step stopped (empty until toggled off)
-- Duration can be computed from `started_at` and `ended_at` timestamps if needed
+- `entry_id`: Groups all rows from one session/routine launch (e.g., "Michael.Test_20251031_045541")
+- **All timestamps (`started_at`, `ended_at`, `created_at`) are stored in UTC** (Coordinated Universal Time)
+- `started_at`: Timestamp when step started or "Launch" row created (UTC)
+- `ended_at`: Timestamp when step stopped (UTC, empty until toggled off)
+- Duration can be computed from `started_at` and `ended_at` timestamps (both in UTC)
+- The app converts timestamps to the user's timezone when displaying or creating calendar events
 

@@ -69,7 +69,8 @@ write_append_entries <- function(df) {
 }
 
 # Create Google Calendar event for completed practice session (using Calendar API directly via httr)
-create_calendar_event <- function(entry_id, routine_name, started_at, ended_at, calendar_id = DEFAULT_CALENDAR_ID, description = NULL) {
+create_calendar_event <- function(entry_id, routine_name, started_at, ended_at, calendar_id, description = NULL) {
+  message("create_calendar_event called with calendar_id='", calendar_id, "'")
   if (is.null(calendar_id) || !nzchar(calendar_id)) {
     message("No calendar ID configured, skipping calendar event creation")
     return(list(id = NULL, status = NA_integer_, body = NULL, error = "No calendar configured"))
@@ -100,14 +101,21 @@ create_calendar_event <- function(entry_id, routine_name, started_at, ended_at, 
       return(list(id = NULL, status = NA_integer_, body = NULL, error = "No access token"))
     }
 
-    start_rfc <- format(lubridate::with_tz(started_at, tzone = TIMEZONE), "%Y-%m-%dT%H:%M:%S")
-    end_rfc   <- format(lubridate::with_tz(ended_at,   tzone = TIMEZONE), "%Y-%m-%dT%H:%M:%S")
+    # Calendar API expects timestamps in the user's timezone for display
+    # started_at and ended_at are already in user's timezone (passed from display_timestamp_local)
+    # Extract timezone from the POSIXct object (set by display_timestamp_local)
+    user_tz_for_cal <- attr(started_at, "tzone")
+    if (is.null(user_tz_for_cal) || !nzchar(user_tz_for_cal)) {
+      user_tz_for_cal <- TIMEZONE  # fallback to config
+    }
+    start_rfc <- format(started_at, "%Y-%m-%dT%H:%M:%S")
+    end_rfc   <- format(ended_at,   "%Y-%m-%dT%H:%M:%S")
 
     url <- paste0("https://www.googleapis.com/calendar/v3/calendars/", curl::curl_escape(calendar_id), "/events")
     event_body <- list(
       summary = paste0(routine_name, " - Practice"),
-      start = list(dateTime = start_rfc, timeZone = TIMEZONE),
-      end   = list(dateTime = end_rfc,   timeZone = TIMEZONE),
+      start = list(dateTime = start_rfc, timeZone = user_tz_for_cal),
+      end   = list(dateTime = end_rfc,   timeZone = user_tz_for_cal),
       description = description %||% ""
     )
 
@@ -141,16 +149,122 @@ create_calendar_event <- function(entry_id, routine_name, started_at, ended_at, 
   })
 }
 
+# Timezone helpers (UTC storage, user timezone display)
+get_user_timezone <- function(user_id) {
+  if (is.null(user_id) || !nzchar(user_id)) return(TIMEZONE)
+  tryCatch({
+    users <- read_sheet_safe(TAB_USERS)
+    users$user_id_clean <- trimws(tolower(as.character(users$user_id)))
+    user_id_clean <- trimws(tolower(as.character(user_id)))
+    row <- users %>% dplyr::filter(.data$user_id_clean == user_id_clean) %>% dplyr::slice(1)
+    if (nrow(row) > 0 && !is.null(row$timezone) && !is.na(row$timezone) && nzchar(as.character(row$timezone))) {
+      return(as.character(row$timezone))
+    }
+    return(TIMEZONE)
+  }, error = function(e) TIMEZONE)
+}
+
+# Store timestamp: convert local system time to UTC
+store_timestamp_utc <- function(local_time = Sys.time()) {
+  # Assume local_time is in system timezone, convert to UTC for storage
+  lubridate::with_tz(local_time, tzone = "UTC")
+}
+
+# Display timestamp: convert UTC to user's timezone
+display_timestamp_local <- function(utc_timestamp, user_id) {
+  user_tz <- get_user_timezone(user_id)
+  if (!inherits(utc_timestamp, c("POSIXct", "POSIXt"))) {
+    utc_timestamp <- as.POSIXct(utc_timestamp, tz = "UTC")
+  }
+  lubridate::with_tz(utc_timestamp, tzone = user_tz)
+}
+
+# Format UTC timestamp for storage (ISO string, UTC)
+format_utc_for_storage <- function(utc_timestamp) {
+  if (!inherits(utc_timestamp, c("POSIXct", "POSIXt"))) {
+    utc_timestamp <- as.POSIXct(utc_timestamp, tz = "UTC")
+  }
+  format(lubridate::with_tz(utc_timestamp, tzone = "UTC"), "%Y-%m-%d %H:%M:%S")
+}
+
 # Resolve calendar id for current user (sheet override > default)
 resolve_user_calendar_id <- function(user_id) {
-  if (is.null(user_id)) return(DEFAULT_CALENDAR_ID)
+  message("  [resolve_user_calendar_id] Called with user_id='", user_id, "', type=", typeof(user_id))
+  if (is.null(user_id) || !nzchar(user_id)) {
+    message("  [resolve_user_calendar_id] user_id is null/empty, returning empty string")
+    return("")
+  }
   cal <- tryCatch({
     users <- read_sheet_safe(TAB_USERS)
-    row <- users %>% dplyr::filter(.data$user_id == user_id) %>% dplyr::slice(1)
-    if (nrow(row) == 0) return(DEFAULT_CALENDAR_ID)
-    val <- as.character(row$google_calendar_id)
-    if (length(val) == 0 || is.na(val) || val == "") DEFAULT_CALENDAR_ID else val
-  }, error = function(e) DEFAULT_CALENDAR_ID)
+    message("  [resolve_user_calendar_id] Read users sheet, got ", nrow(users), " rows")
+    message("  [resolve_user_calendar_id] User IDs in sheet: ", paste(unique(users$user_id), collapse=", "))
+    message("  [resolve_user_calendar_id] Columns in sheet: ", paste(names(users), collapse=", "))
+    # Debug: show full contents of each row to spot any misalignment
+    for (i in seq_len(min(5, nrow(users)))) {
+      msg <- paste0("  [resolve_user_calendar_id] Row ", i, ": user_id='", users$user_id[i], 
+                   "', google_calendar_id='", users$google_calendar_id[i], "'")
+      message(msg)
+    }
+    
+    # Trim whitespace and use case-insensitive matching
+    # First, filter out rows with NA, empty, or literal "NA" string user_ids
+    users_valid <- users[!is.na(users$user_id) & 
+                         trimws(as.character(users$user_id)) != "" & 
+                         trimws(tolower(as.character(users$user_id))) != "na", , drop = FALSE]
+    message("  [resolve_user_calendar_id] After filtering invalid rows, got ", nrow(users_valid), " valid rows")
+    
+    users_valid$user_id_clean <- trimws(tolower(as.character(users_valid$user_id)))
+    user_id_clean <- trimws(tolower(as.character(user_id)))
+    message("  [resolve_user_calendar_id] Searching for user_id_clean='", user_id_clean, "'")
+    
+    # Debug: show all user_id_clean values
+    message("  [resolve_user_calendar_id] All valid user_id_clean values: ", paste(users_valid$user_id_clean, collapse=", "))
+    message("  [resolve_user_calendar_id] All valid original user_id values: ", paste(users_valid$user_id, collapse=", "))
+    
+    # Filter and verify the match is correct - only match on valid rows
+    candidates <- users_valid[users_valid$user_id_clean == user_id_clean, , drop = FALSE]
+    message("  [resolve_user_calendar_id] Candidates after filtering: ", nrow(candidates))
+    if (nrow(candidates) > 0) {
+      message("  [resolve_user_calendar_id] Candidate user_ids: ", paste(candidates$user_id, collapse=", "))
+      message("  [resolve_user_calendar_id] Candidate user_id_clean values: ", paste(candidates$user_id_clean, collapse=", "))
+    }
+    
+    # Get first row only if we have matches
+    if (nrow(candidates) > 0) {
+      row <- candidates[1, , drop = FALSE]
+    } else {
+      row <- candidates  # empty data frame
+    }
+    if (nrow(row) == 0) {
+      message("  [resolve_user_calendar_id] User '", user_id, "' not found in users sheet. Available users: ", paste(unique(users_valid$user_id), collapse=", "))
+      return("")
+    }
+    
+    message("  [resolve_user_calendar_id] Found matching row!")
+    message("  [resolve_user_calendar_id] Row user_id='", row$user_id, "', user_id_clean='", row$user_id_clean, "', google_calendar_id='", row$google_calendar_id, "'")
+    
+    # VERIFY THE MATCH IS CORRECT (double-check)
+    row_user_id_clean <- trimws(tolower(as.character(row$user_id)))
+    if (row_user_id_clean != user_id_clean) {
+      message("  [resolve_user_calendar_id] ERROR: Row user_id mismatch! Expected '", user_id_clean, "' but got '", row_user_id_clean, "'")
+      message("  [resolve_user_calendar_id] Aborting calendar lookup due to mismatch")
+      return("")
+    }
+    
+    val <- trimws(as.character(row$google_calendar_id))
+    message("  [resolve_user_calendar_id] Trimmed calendar_id='", val, "', length=", length(val), ", nzchar=", nzchar(val))
+    
+    if (length(val) == 0 || is.na(val) || val == "" || !nzchar(val)) {
+      message("  [resolve_user_calendar_id] User '", user_id, "' (row found) has empty google_calendar_id, skipping calendar event")
+      return("")
+    }
+    message("  [resolve_user_calendar_id] RESOLVED - returning calendar '", val, "' for user '", user_id, "'")
+    val
+  }, error = function(e) {
+    message("  [resolve_user_calendar_id] ERROR resolving calendar for user '", user_id, "': ", e$message)
+    return("")
+  })
+  message("  [resolve_user_calendar_id] Final return value: '", cal, "'")
   cal
 }
 
@@ -182,7 +296,7 @@ update_entry_ended_at <- function(entry_id, item_name, ended_at, started_at_hint
     # Find candidate rows for this entry
     candidates <- which(entries$entry_id == entry_id & entries$item_name == item_name)
     if (length(candidates) == 0) {
-      message(sprintf("No rows found matching entry_id='%s' and item_name='%s'", entry_id, item_name))
+      # This is expected on launch - don't show user-facing message
       return(FALSE)
     }
 
@@ -214,7 +328,13 @@ update_entry_ended_at <- function(entry_id, item_name, ended_at, started_at_hint
     row_num <- match_idx + 1  # +1 for header
     col_letter <- col_index_to_letter(ended_col_idx)
     target_range <- paste0(col_letter, row_num, ":", col_letter, row_num)
-    ended_at_str <- format(ended_at, "%Y-%m-%d %H:%M:%S")
+    # Store in UTC: ensure ended_at is converted to UTC
+    if (!inherits(ended_at, c("POSIXct", "POSIXt"))) {
+      ended_at <- as.POSIXct(ended_at, tz = "UTC")
+    } else {
+      ended_at <- lubridate::with_tz(ended_at, tzone = "UTC")
+    }
+    ended_at_str <- format_utc_for_storage(ended_at)
 
     # Write the single cell
     googlesheets4::range_write(
@@ -296,8 +416,42 @@ safe_parse_time <- function(x, tz = TIMEZONE) {
 
 ui <- fluidPage(
   titlePanel("Manual Practice Beta"),
+  tags$head(
+    tags$style(HTML("
+      .container-fluid { max-width: 1000px; margin: 0 auto; padding: 0 10px; }
+      .main-panel { padding: 0 5px; }
+      .sidebar-panel { padding-right: 10px; }
+      .steps-container { width: 100%; min-height: auto; }
+      .step-row { margin-bottom: 8px; }
+      .step-name { font-weight: bold; padding-right: 10px !important; }
+      .step-display-text { font-size: 0.9em; color: #666; font-style: italic; padding-top: 2px; padding-bottom: 4px; }
+      .step-timer { text-align: right; padding-right: 10px !important; }
+      .step-intended-duration { text-align: center; padding-right: 5px !important; color: #888; font-size: 0.9em; }
+      .step-toggle { padding-left: 5px !important; }
+      .routine-description { margin-top: 15px; margin-bottom: 15px; min-height: auto; max-height: 150px; padding: 8px; background-color: #f9f9f9; border-radius: 4px; }
+      .col-sm-5, .col-sm-4, .col-sm-3, .col-sm-2 { padding-left: 5px; padding-right: 5px; }
+      .switch-input { 
+        min-width: 100px !important; 
+        height: 38px !important; 
+        border-radius: 19px !important;
+      }
+      .switch-input .switch-toggle { 
+        width: 42px !important; 
+        height: 34px !important; 
+        border-radius: 17px !important;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.2) !important;
+      }
+      .switch-input.on { background-color: #007bff !important; }
+      .switch-input.off { background-color: #6c757d !important; }
+      @media (max-width: 768px) {
+        .switch-input { min-width: 90px !important; height: 36px !important; }
+        .switch-input .switch-toggle { width: 40px !important; height: 32px !important; }
+      }
+    "))
+  ),
   sidebarLayout(
     sidebarPanel(
+      width = 3,
       tags$label("User"),
       textOutput("user_label"),
       uiOutput("resume_ui"),
@@ -308,10 +462,11 @@ ui <- fluidPage(
       tags$div(id = "save_status")
     ),
     mainPanel(
+      width = 9,
       h4(textOutput("routine_title")),
       div(strong("Routine elapsed:"), textOutput("routine_elapsed", inline = TRUE)),
-      uiOutput("steps_ui"),
-      tags$hr()
+      div(class = "routine-description", textOutput("routine_description", inline = FALSE)),
+      div(class = "steps-container", uiOutput("steps_ui"))
       # Diagnostics removed
     )
   )
@@ -337,9 +492,21 @@ server <- function(input, output, session) {
   observeEvent(TRUE, {
     u <- tryCatch({
       q <- parseQueryString(isolate(session$clientData$url_search %||% ""))
-      q$user %||% DEFAULT_USER_ID
-    }, error = function(e) DEFAULT_USER_ID)
+      url_user <- q$user %||% DEFAULT_USER_ID
+      message("=== USER INITIALIZATION ===")
+      message("URL query string: ", isolate(session$clientData$url_search %||% ""))
+      message("Parsed query: ", paste(names(q), "=", q, collapse=", "))
+      message("q$user='", q$user, "'")
+      message("DEFAULT_USER_ID='", DEFAULT_USER_ID, "'")
+      message("Setting state$user_id='", url_user, "'")
+      url_user
+    }, error = function(e) {
+      message("Error parsing URL query: ", e$message)
+      message("Falling back to DEFAULT_USER_ID='", DEFAULT_USER_ID, "'")
+      DEFAULT_USER_ID
+    })
     state$user_id <- u
+    message("state$user_id is now: '", state$user_id, "'")
     output$user_label <- renderText(if (is.null(u) || !nzchar(u)) "Guest" else u)
     
     # Check for incomplete session after user is set (disabled for now)
@@ -500,22 +667,24 @@ server <- function(input, output, session) {
     })
     state$steps <- steps
     state$entry_id <- paste0(state$user_id, "_", format(Sys.time(), "%Y%m%d_%H%M%S"))
-    state$started_at <- with_tz(Sys.time(), tzone = TIMEZONE)
+    # Store started_at in UTC
+    state$started_at <- store_timestamp_utc(Sys.time())
     state$routine_timer_started <- Sys.time()
     state$session_complete <- FALSE
     
-    # Write "Launch" row immediately
+    # Write "Launch" row immediately (all timestamps in UTC)
+    launch_start_utc <- store_timestamp_utc(Sys.time())
     launch_row <- data.frame(
       entry_id = state$entry_id,
       user_id = state$user_id,
       routine_id = state$selected_routine,
       item_name = "Launch",
       category = NA,
-      started_at = state$started_at,
+      started_at = format_utc_for_storage(launch_start_utc),
       ended_at = NA,  # Empty until session completes
       notes = NA,
       cal_event_id = NA,
-      created_at = state$started_at,
+      created_at = format_utc_for_storage(launch_start_utc),
       stringsAsFactors = FALSE
     )
     tryCatch({
@@ -543,7 +712,28 @@ server <- function(input, output, session) {
   observeEvent(input$complete_session, {
     req(state$selected_routine, state$user_id, !state$session_complete)
     state$session_complete <- TRUE  # Stop timer immediately
-    ended_at <- with_tz(Sys.time(), tzone = TIMEZONE)
+    # Store ended_at in UTC
+    ended_at_utc <- store_timestamp_utc(Sys.time())
+    
+    # Close any open steps (those still ON)
+    if (!is.null(state$steps) && nrow(state$steps) > 0) {
+      for (ord in state$steps$step_order) {
+        k <- as.character(ord)
+        if (!is.null(state$step_start_times[[k]])) {
+          # This step is still ON, close it
+          step_row <- state$steps %>% filter(.data$step_order == as.integer(k)) %>% slice(1)
+          if (nrow(step_row) > 0) {
+            tryCatch({
+              update_entry_ended_at(state$entry_id, step_row$item_name, ended_at_utc, started_at_hint = state$step_start_times[[k]])
+              state$step_frozen_elapsed[[k]] <- as.numeric(difftime(ended_at_utc, state$step_start_times[[k]], units = "secs"))
+            }, error = function(e) {
+              message("Failed to close step ", step_row$item_name, " on Complete: ", e$message)
+            })
+          }
+        }
+      }
+    }
+    
     # Calculate total elapsed time
     total_sec <- tryCatch({
       as.integer(difftime(Sys.time(), state$routine_timer_started, units = "secs"))
@@ -551,10 +741,20 @@ server <- function(input, output, session) {
     if (is.na(total_sec) || total_sec < 0) total_sec <- 0
     total_min <- round(total_sec / 60, 2)
 
-    # Create Google Calendar event if calendar ID is configured (user override > default)
+    # Create Google Calendar event if calendar ID is configured (user-specific only, no default fallback)
     cal_event_id <- NA
+    message("=== CALENDAR ROUTING DEBUG ===")
+    message("Calendar: Current state$user_id='", state$user_id, "'")
+    message("Calendar: typeof(state$user_id)=", typeof(state$user_id))
+    message("Calendar: is.null(state$user_id)=", is.null(state$user_id))
+    message("Calendar: nzchar(state$user_id)=", nzchar(state$user_id))
     cal_id <- resolve_user_calendar_id(state$user_id)
-    if (nzchar(cal_id)) {
+    message("Calendar: resolve_user_calendar_id returned: '", cal_id, "'")
+    message("Calendar: typeof(cal_id)=", typeof(cal_id))
+    message("Calendar: is.null(cal_id)=", is.null(cal_id))
+    message("Calendar: nzchar(cal_id)=", nzchar(cal_id))
+    message("=== END CALENDAR DEBUG ===")
+    if (!is.null(cal_id) && nzchar(cal_id)) {
       routine_name <- state$routines %>% filter(.data$routine_id == state$selected_routine) %>% pull(.data$routine_name) %>% dplyr::first()
 
       # Build a concise description from step entries for this entry_id (robust)
@@ -564,10 +764,12 @@ server <- function(input, output, session) {
         if (!all(req_cols %in% names(entries))) return("")
         e <- entries[entries$entry_id == state$entry_id & !(entries$item_name %in% c("Launch", "Complete and Save")), , drop = FALSE]
         if (nrow(e) == 0) return("")
-        s <- safe_parse_time(e$started_at, tz = TIMEZONE)
-        en_raw <- safe_parse_time(e$ended_at, tz = TIMEZONE)
+        # Parse timestamps as UTC (they're stored in UTC now)
+        s <- safe_parse_time(e$started_at, tz = "UTC")
+        en_raw <- safe_parse_time(e$ended_at, tz = "UTC")
         en <- en_raw
-        en[is.na(en)] <- ended_at
+        # If ended_at is missing, use the session end time (already UTC)
+        en[is.na(en)] <- ended_at_utc
         ord <- order(s, na.last = TRUE)
         s <- s[ord]; en <- en[ord]; names_ord <- e$item_name[ord]
         # Drop rows without a valid start time
@@ -586,12 +788,15 @@ server <- function(input, output, session) {
       }, error = function(e) { message("Calendar desc error: ", e$message); "" })
       if (nzchar(desc)) message("Calendar payload description (first 200 chars): ", substr(desc, 1, 200))
 
+      # Calendar events: use user's timezone for display, but compute from UTC timestamps
+      started_at_display <- display_timestamp_local(state$started_at, state$user_id)
+      ended_at_display <- display_timestamp_local(ended_at_utc, state$user_id)
       res <- tryCatch({
         create_calendar_event(
           state$entry_id,
           routine_name %||% "Practice",
-          state$started_at,
-          ended_at,
+          started_at_display,
+          ended_at_display,
           cal_id,
           description = if (nzchar(desc)) desc else paste0("User: ", state$user_id, "\nTotal: ", total_min, " min")
         )
@@ -605,18 +810,19 @@ server <- function(input, output, session) {
       message("No calendar ID found for user ", state$user_id, "; skipping calendar event")
     }
     
-    # Write "Complete and Save" row (steps already saved when toggled)
+    # Write "Complete and Save" row (all timestamps in UTC)
+    complete_end_utc <- ended_at_utc
     complete_row <- data.frame(
       entry_id = state$entry_id,
       user_id = state$user_id,
       routine_id = state$selected_routine,
       item_name = "Complete and Save",
       category = NA,
-      started_at = ended_at,
-      ended_at = ended_at,
+      started_at = format_utc_for_storage(complete_end_utc),
+      ended_at = format_utc_for_storage(complete_end_utc),
       notes = NA,
       cal_event_id = ifelse(is.null(cal_event_id), NA, cal_event_id),
-      created_at = ended_at,
+      created_at = format_utc_for_storage(complete_end_utc),
       stringsAsFactors = FALSE
     )
     tryCatch({
@@ -647,27 +853,76 @@ server <- function(input, output, session) {
     req(state$steps)
     steps <- state$steps
     tags$div(
+      class = "steps-container",
       lapply(seq_len(nrow(steps)), function(i) {
         ord <- as.character(steps$step_order[i])
         nm <- steps$item_name[i]
-        fluidRow(
-          column(6, tags$b(nm)),
-          column(3, textOutput(paste0("timer_", ord))),
-          column(3,
-            switchInput(
-              inputId = paste0("toggle_", ord),
-              label = NULL,
-              value = FALSE,
-              onLabel = "On",
-              offLabel = "Off",
-              size = "small",
-              width = "100px"
-            )
-          ),
-          tags$hr()
+        
+        # Check for display_text (flexible column name)
+        display_txt <- NULL
+        if ("display_text" %in% names(steps)) {
+          val <- steps$display_text[i]
+          if (!is.na(val) && nzchar(as.character(val))) {
+            display_txt <- as.character(val)
+          }
+        }
+        
+        # Check for intended_duration or intended_duration_min
+        intended_dur <- NULL
+        dur_col <- NULL
+        if ("intended_duration" %in% names(steps)) {
+          dur_col <- steps$intended_duration
+        } else if ("intended_duration_min" %in% names(steps)) {
+          dur_col <- steps$intended_duration_min
+        }
+        if (!is.null(dur_col) && !is.na(dur_col[i])) {
+          intended_dur <- as.numeric(dur_col[i])
+          if (is.na(intended_dur)) intended_dur <- NULL
+        }
+        
+        tags$div(
+          fluidRow(
+            class = "step-row",
+            column(5, 
+              tags$div(
+                tags$b(nm, class = "step-name"),
+                if (!is.null(display_txt)) tags$div(display_txt, class = "step-display-text")
+              )
+            ),
+            column(2, style = "text-align: center; padding: 0 5px;",
+              if (!is.null(intended_dur)) tags$span(paste0(intended_dur, " min"), class = "step-intended-duration") else tags$span("")
+            ),
+            column(2, style = "text-align: right; padding: 0 5px;", tags$span(textOutput(paste0("timer_", ord)), class = "step-timer")),
+            column(3, div(class = "step-toggle",
+              switchInput(
+                inputId = paste0("toggle_", ord),
+                label = NULL,
+                value = FALSE,
+                onLabel = "On",
+                offLabel = "Off",
+                size = "large",
+                width = "110px"
+              )
+            ))
+          )
         )
       })
     )
+  })
+
+  output$routine_description <- renderText({
+    req(state$selected_routine)
+    routine <- state$routines %>% filter(.data$routine_id == state$selected_routine) %>% slice(1)
+    if (nrow(routine) > 0) {
+      desc <- routine$description
+      if (!is.null(desc) && !is.na(desc) && nzchar(as.character(desc))) {
+        as.character(desc)
+      } else {
+        ""
+      }
+    } else {
+      ""
+    }
   })
 
   # Per-step toggle handlers + timers
@@ -682,26 +937,26 @@ server <- function(input, output, session) {
           toggle_value <- input[[paste0("toggle_", k)]]
           step_row <- isolate(state$steps) %>% filter(.data$step_order == as.integer(k)) %>% slice(1)
           if (nrow(step_row) == 0) return()
-          current_time <- with_tz(Sys.time(), tzone = TIMEZONE)
           eid <- isolate(state$entry_id)
 
           if (toggle_value) {
-            # Start: remember start time, clear frozen
-            state$step_start_times[[k]] <- current_time
+            # Start: remember start time in UTC, clear frozen
+            current_time_utc <- store_timestamp_utc(Sys.time())
+            state$step_start_times[[k]] <- current_time_utc
             state$step_frozen_elapsed[[k]] <- NULL
 
-            # Append start row
+            # Append start row (all timestamps in UTC)
             entry_row <- data.frame(
               entry_id = eid,
               user_id = isolate(state$user_id),
               routine_id = isolate(state$selected_routine),
               item_name = step_row$item_name,
               category = step_row$category %||% NA,
-              started_at = current_time,
+              started_at = format_utc_for_storage(current_time_utc),
               ended_at = NA,
               notes = NA,
               cal_event_id = NA,
-              created_at = current_time,
+              created_at = format_utc_for_storage(current_time_utc),
               stringsAsFactors = FALSE
             )
             tryCatch({
@@ -711,17 +966,17 @@ server <- function(input, output, session) {
               showNotification(paste0("Failed to start ", step_row$item_name, ": ", e$message), type = "error", duration = 3)
             })
           } else {
-            # Stop: freeze elapsed, update ended_at in sheet
+            # Stop: freeze elapsed, update ended_at in sheet (store in UTC)
+            current_time_utc <- store_timestamp_utc(Sys.time())
             if (!is.null(state$step_start_times[[k]])) {
-              state$step_frozen_elapsed[[k]] <- as.numeric(difftime(current_time, state$step_start_times[[k]], units = "secs"))
+              state$step_frozen_elapsed[[k]] <- as.numeric(difftime(current_time_utc, state$step_start_times[[k]], units = "secs"))
             }
             tryCatch({
-              success <- update_entry_ended_at(eid, step_row$item_name, current_time, started_at_hint = state$step_start_times[[k]])
+              success <- update_entry_ended_at(eid, step_row$item_name, current_time_utc, started_at_hint = state$step_start_times[[k]])
               if (success) {
                 showNotification(paste0("Stopped: ", step_row$item_name), type = "message", duration = 1)
-              } else {
-                showNotification(paste0("No active session found for ", step_row$item_name), type = "warning", duration = 2)
               }
+              # Don't show "No active session found" - this is expected when toggling OFF an already-closed step
             }, error = function(e) {
               showNotification(paste0("Failed to stop ", step_row$item_name, ": ", e$message), type = "error", duration = 3)
             })

@@ -39,7 +39,12 @@ R -q -e "shiny::runApp('.', host='127.0.0.1', port=3840)"
 - We redeploy to the existing shinyapps.io app `experimental_app` (quota-friendly update).
 - Script: `Deploy_ManualPracticeBeta.R` (uses `rsconnect::deployApp`).
 
-## Today’s changes (summary)
+## Today's changes (summary)
+- **Timezone strategy implemented**: All timestamps stored in UTC; displayed/used in user's timezone
+  - Added `timezone` column support in `users` sheet (per-user timezone)
+  - Helper functions: `store_timestamp_utc()`, `display_timestamp_local()`, `get_user_timezone()`
+  - Calendar events show at user's local time (subjective experience)
+  - See `HOWTO/timezone_strategy.md` for full strategy documentation
 - Stabilized ended_at updates and step matching; removed reliance on full-row rewrites
 - Switched session grouping to `entry_id` throughout
 - Implemented per-step timers and froze on OFF
@@ -59,15 +64,19 @@ R -q -e "shiny::runApp('.', host='127.0.0.1', port=3840)"
 2. Data shape + schema hygiene (P0)
    - Audit for any lingering `entry_group_id` references; remove entirely
    - Confirm headers match `schema_headers.md` in all code paths
-3. Calendar robustness (P0)
-   - Per-user timezone override (from `users` sheet); verify event TZ
+3. Calendar robustness (P0) — **DONE**
+   - ✅ Per-user timezone override (from `users` sheet); verified event TZ
    - Optional: add location or custom title suffix from routine metadata
 4. UI improvements (P1)
    - Persist per-step elapsed mm:ss across resume (init from existing row)
    - Add subtle visual feedback on successful OFF write (e.g., checkmark)
    - Keyboard shortcuts for quick toggles (if desired)
-5. Incomplete session resume (P1)
-   - Make resume prompt resilient to partial data; load existing ON steps and reflect frozen durations
+5. Session resume after disconnect (P2 - Future feature)
+   - On app load, detect incomplete sessions from `practice_entries` sheet
+   - Display "Resume" button instead of "Launch Routine" when incomplete session found
+   - Restore all timers: routine elapsed continues ticking, step timers show frozen time if OFF or continue if ON
+   - Architecture supports this via timestamps, but requires careful state reconstruction
+   - **Note:** This is a complex feature and will be tackled as a separate project
 6. Performance (P1)
    - Cache static tabs (`routines`, `routine_steps`) per session; invalidate on demand
    - Batch writes if a user toggles multiple steps quickly
