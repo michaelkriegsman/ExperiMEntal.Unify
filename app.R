@@ -28,7 +28,7 @@ ensure_pkg <- function(pkg) {
   x
 }
 
-invisible(lapply(c("shiny", "googlesheets4", "dplyr", "lubridate", "httr", "jsonlite", "shinyWidgets"), ensure_pkg))
+invisible(lapply(c("shiny", "googlesheets4", "dplyr", "lubridate", "httr", "jsonlite", "shinyWidgets", "gargle"), ensure_pkg))
 
 # Auth: prefer service account if available; otherwise deauth (public sheets only)
 # Includes both Sheets and Calendar scopes for full functionality
@@ -87,41 +87,43 @@ create_calendar_event <- function(entry_id, routine_name, started_at, ended_at, 
       return(NULL)
     }
     
-    # Get access token using service account
-    token <- googlesheets4::gs4_token()  # Reuse existing token if available
-    if (is.null(token)) {
-      # Re-authenticate if needed
-      googlesheets4::gs4_auth(path = GS_SERVICE_JSON, scopes = GS_SCOPES)
-      token <- googlesheets4::gs4_token()
+    # Get access token using service account via gargle (what googlesheets4 uses)
+    if (!requireNamespace("gargle", quietly = TRUE)) {
+      warning("gargle package not available; cannot create calendar event")
+      return(NULL)
     }
+    
+    # Authenticate with Calendar API scopes
+    token <- gargle::token_fetch(
+      scopes = GS_SCOPES,
+      path = GS_SERVICE_JSON
+    )
     
     if (is.null(token)) {
       warning("Could not obtain access token for Calendar API")
       return(NULL)
     }
     
-    # Format times for Calendar API (RFC3339)
-    start_rfc <- format(started_at, "%Y-%m-%dT%H:%M:%S%z")
-    end_rfc <- format(ended_at, "%Y-%m-%dT%H:%M:%S%z")
-    # Ensure timezone format is correct (e.g., -0500 not -05:00)
-    if (nchar(start_rfc) == 20) start_rfc <- paste0(substr(start_rfc, 1, 19), "+00:00")
-    if (nchar(end_rfc) == 20) end_rfc <- paste0(substr(end_rfc, 1, 19), "+00:00")
+    # Format times for Calendar API (RFC3339 with timezone)
+    start_rfc <- format(lubridate::with_tz(started_at, tzone = TIMEZONE), "%Y-%m-%dT%H:%M:%S")
+    end_rfc <- format(lubridate::with_tz(ended_at, tzone = TIMEZONE), "%Y-%m-%dT%H:%M:%S")
     
     # Calendar API endpoint
     url <- paste0("https://www.googleapis.com/calendar/v3/calendars/", 
                   httr::url_encode(calendar_id), "/events")
     
-    # Event payload
+    # Event payload (Calendar API expects dateTime + timeZone separately)
     event_body <- list(
       summary = paste0(routine_name, " - Practice"),
       start = list(dateTime = start_rfc, timeZone = TIMEZONE),
       end = list(dateTime = end_rfc, timeZone = TIMEZONE)
     )
     
-    # Make API request
+    # Make API request using token's credentials
+    auth_header <- paste("Bearer", token$credentials$access_token)
     resp <- httr::POST(
       url,
-      httr::add_headers(Authorization = paste("Bearer", token$credentials$access_token)),
+      httr::add_headers(Authorization = auth_header),
       httr::content_type_json(),
       body = jsonlite::toJSON(event_body, auto_unbox = TRUE)
     )
