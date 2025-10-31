@@ -28,7 +28,7 @@ ensure_pkg <- function(pkg) {
   x
 }
 
-invisible(lapply(c("shiny", "googlesheets4", "dplyr", "lubridate", "httr", "jsonlite", "shinyWidgets", "gargle"), ensure_pkg))
+invisible(lapply(c("shiny", "googlesheets4", "dplyr", "lubridate", "httr", "jsonlite", "shinyWidgets", "gargle", "curl"), ensure_pkg))
 
 # Auth: prefer service account if available; otherwise deauth (public sheets only)
 # Includes both Sheets and Calendar scopes for full functionality
@@ -69,7 +69,7 @@ write_append_entries <- function(df) {
 }
 
 # Create Google Calendar event for completed practice session (using Calendar API directly via httr)
-create_calendar_event <- function(entry_id, routine_name, started_at, ended_at, calendar_id = DEFAULT_CALENDAR_ID) {
+create_calendar_event <- function(entry_id, routine_name, started_at, ended_at, calendar_id = DEFAULT_CALENDAR_ID, description = NULL) {
   if (is.null(calendar_id) || !nzchar(calendar_id)) {
     message("No calendar ID configured, skipping calendar event creation")
     return(list(id = NULL, status = NA_integer_, body = NULL, error = "No calendar configured"))
@@ -103,11 +103,12 @@ create_calendar_event <- function(entry_id, routine_name, started_at, ended_at, 
     start_rfc <- format(lubridate::with_tz(started_at, tzone = TIMEZONE), "%Y-%m-%dT%H:%M:%S")
     end_rfc   <- format(lubridate::with_tz(ended_at,   tzone = TIMEZONE), "%Y-%m-%dT%H:%M:%S")
 
-    url <- paste0("https://www.googleapis.com/calendar/v3/calendars/", httr::url_encode(calendar_id), "/events")
+    url <- paste0("https://www.googleapis.com/calendar/v3/calendars/", curl::curl_escape(calendar_id), "/events")
     event_body <- list(
       summary = paste0(routine_name, " - Practice"),
       start = list(dateTime = start_rfc, timeZone = TIMEZONE),
-      end   = list(dateTime = end_rfc,   timeZone = TIMEZONE)
+      end   = list(dateTime = end_rfc,   timeZone = TIMEZONE),
+      description = description %||% ""
     )
 
     auth_header <- paste("Bearer", token$credentials$access_token)
@@ -277,6 +278,20 @@ check_incomplete_session <- function(user_id) {
     message("Error checking incomplete session: ", e$message)
     return(NULL)
   })
+}
+
+# Safe timestamp parser for mixed inputs from Sheets
+safe_parse_time <- function(x, tz = TIMEZONE) {
+  if (inherits(x, c("POSIXct", "POSIXt"))) return(as.POSIXct(x, tz = tz))
+  if (is.list(x)) x <- unlist(x, use.names = FALSE)
+  if (is.numeric(x)) return(as.POSIXct(x, origin = "1970-01-01", tz = tz))
+  x_chr <- suppressWarnings(as.character(x))
+  try_formats <- c("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%m/%d/%Y %H:%M:%S", "%Y-%m-%d")
+  for (fmt in try_formats) {
+    dt <- suppressWarnings(as.POSIXct(x_chr, format = fmt, tz = tz))
+    if (!all(is.na(dt))) return(dt)
+  }
+  suppressWarnings(lubridate::ymd_hms(x_chr, tz = tz, quiet = TRUE))
 }
 
 ui <- fluidPage(
@@ -541,13 +556,44 @@ server <- function(input, output, session) {
     cal_id <- resolve_user_calendar_id(state$user_id)
     if (nzchar(cal_id)) {
       routine_name <- state$routines %>% filter(.data$routine_id == state$selected_routine) %>% pull(.data$routine_name) %>% dplyr::first()
+
+      # Build a concise description from step entries for this entry_id (robust)
+      desc <- tryCatch({
+        entries <- read_sheet_safe(TAB_ENTRIES)
+        req_cols <- c("entry_id", "item_name", "started_at", "ended_at")
+        if (!all(req_cols %in% names(entries))) return("")
+        e <- entries[entries$entry_id == state$entry_id & !(entries$item_name %in% c("Launch", "Complete and Save")), , drop = FALSE]
+        if (nrow(e) == 0) return("")
+        s <- safe_parse_time(e$started_at, tz = TIMEZONE)
+        en_raw <- safe_parse_time(e$ended_at, tz = TIMEZONE)
+        en <- en_raw
+        en[is.na(en)] <- ended_at
+        ord <- order(s, na.last = TRUE)
+        s <- s[ord]; en <- en[ord]; names_ord <- e$item_name[ord]
+        # Drop rows without a valid start time
+        keep <- !is.na(s)
+        s <- s[keep]; en <- en[keep]; names_ord <- names_ord[keep]
+        dur_sec <- ifelse(!is.na(s) & !is.na(en), as.integer(difftime(en, s, units = "secs")), NA_integer_)
+        fmt <- function(x) ifelse(is.na(x) | x < 0, "—", sprintf("%02d:%02d", floor(x/60), x %% 60))
+        lines <- paste0(seq_along(names_ord), ". ", names_ord, ": ", fmt(dur_sec))
+        paste0(
+          "User: ", state$user_id, "\n",
+          "Routine: ", routine_name %||% "Practice", "\n",
+          "Total: ", total_min, " min\n",
+          "Steps (mm:ss):\n",
+          paste(lines, collapse = "\n")
+        )
+      }, error = function(e) { message("Calendar desc error: ", e$message); "" })
+      if (nzchar(desc)) message("Calendar payload description (first 200 chars): ", substr(desc, 1, 200))
+
       res <- tryCatch({
         create_calendar_event(
           state$entry_id,
           routine_name %||% "Practice",
           state$started_at,
           ended_at,
-          cal_id
+          cal_id,
+          description = if (nzchar(desc)) desc else paste0("User: ", state$user_id, "\nTotal: ", total_min, " min")
         )
       }, error = function(e) list(id = NULL, status = NA_integer_, body = NULL, error = e$message))
       if (!is.null(res$id)) {
@@ -701,8 +747,6 @@ server <- function(input, output, session) {
   }, ignoreInit = FALSE, once = TRUE)
 }
 
-# Run app if executed directly (not sourced)
-if (!interactive()) {
-  shinyApp(ui, server)
-}
+# Return the Shiny app object (works in RStudio and Rscript)
+shinyApp(ui, server)
 
