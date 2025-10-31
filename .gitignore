@@ -1,0 +1,28 @@
+# R / RStudio
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+.Renviron
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Shiny / rsconnect
+rsconnect/
+.Rscreenshot.png
+
+# Logs
+*.log
+
+# Keys / credentials (do NOT commit service accounts)
+*.key
+*.pem
+*service*.json
+*credentials*.json
+*august-storm*.json
+
+# Build / misc
+*.tar.gz
+*.zip
