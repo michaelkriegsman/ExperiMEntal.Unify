@@ -75,13 +75,23 @@ create_calendar_event <- function(entry_id, routine_name, started_at, ended_at, 
     return(NULL)
   }
   
+  # Ensure package is available
+  if (!requireNamespace("googleCalendarR", quietly = TRUE)) {
+    warning("googleCalendarR package not available; cannot create calendar event")
+    return(NULL)
+  }
+  
   tryCatch({
-    # Use same service account for Calendar API (already authenticated with scopes above)
-    if (nzchar(GS_SERVICE_JSON) && file.exists(GS_SERVICE_JSON)) {
-      googleCalendarR::gc_auth(path = GS_SERVICE_JSON, scopes = GS_SCOPES)
+    # Authenticate with Calendar API using service account
+    if (!nzchar(GS_SERVICE_JSON) || !file.exists(GS_SERVICE_JSON)) {
+      warning("Service account JSON not found; cannot create calendar event")
+      return(NULL)
     }
     
-    # Create event
+    # Authenticate for Calendar API (separate from Sheets auth)
+    googleCalendarR::gc_auth(path = GS_SERVICE_JSON, scopes = GS_SCOPES)
+    
+    # Create event - ensure times are in correct format
     event <- googleCalendarR::gc_event(
       summary = paste0(routine_name, " - Practice"),
       start = started_at,
@@ -89,9 +99,17 @@ create_calendar_event <- function(entry_id, routine_name, started_at, ended_at, 
       calendarId = calendar_id
     )
     
+    if (is.null(event) || is.null(event$id)) {
+      warning("Calendar event created but no event ID returned")
+      return(NULL)
+    }
+    
     return(event$id)
   }, error = function(e) {
-    message("Failed to create calendar event: ", e$message)
+    # More detailed error message for debugging
+    err_msg <- paste0("Failed to create calendar event: ", e$message, 
+                     " (Calendar ID: ", calendar_id, ")")
+    warning(err_msg)
     return(NULL)
   })
 }
@@ -497,13 +515,22 @@ server <- function(input, output, session) {
     cal_id <- resolve_user_calendar_id(state$user_id)
     if (nzchar(cal_id)) {
       routine_name <- state$routines %>% filter(.data$routine_id == state$selected_routine) %>% pull(.data$routine_name) %>% dplyr::first()
-      cal_event_id <- create_calendar_event(
-        state$entry_id,
-        routine_name %||% "Practice",
-        state$started_at,
-        ended_at,
-        cal_id
-      )
+      tryCatch({
+        cal_event_id <- create_calendar_event(
+          state$entry_id,
+          routine_name %||% "Practice",
+          state$started_at,
+          ended_at,
+          cal_id
+        )
+        if (is.null(cal_event_id)) {
+          showNotification("Calendar event creation failed (check logs)", type = "warning", duration = 3)
+        }
+      }, error = function(e) {
+        showNotification(paste0("Calendar error: ", e$message), type = "warning", duration = 5)
+      })
+    } else {
+      message("No calendar ID found for user ", state$user_id, "; skipping calendar event")
     }
     
     # Write "Complete and Save" row (steps already saved when toggled)
