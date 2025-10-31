@@ -72,54 +72,44 @@ write_append_entries <- function(df) {
 create_calendar_event <- function(entry_id, routine_name, started_at, ended_at, calendar_id = DEFAULT_CALENDAR_ID) {
   if (is.null(calendar_id) || !nzchar(calendar_id)) {
     message("No calendar ID configured, skipping calendar event creation")
-    return(NULL)
+    return(list(id = NULL, status = NA_integer_, body = NULL, error = "No calendar configured"))
   }
   
   if (!requireNamespace("httr", quietly = TRUE) || !requireNamespace("jsonlite", quietly = TRUE)) {
     warning("httr/jsonlite not available; cannot create calendar event")
-    return(NULL)
+    return(list(id = NULL, status = NA_integer_, body = NULL, error = "Missing httr/jsonlite"))
   }
   
   tryCatch({
-    # Authenticate with Calendar API using service account
     if (!nzchar(GS_SERVICE_JSON) || !file.exists(GS_SERVICE_JSON)) {
       warning("Service account JSON not found; cannot create calendar event")
-      return(NULL)
+      return(list(id = NULL, status = NA_integer_, body = NULL, error = "Missing service account JSON"))
     }
-    
-    # Get access token using service account via gargle (what googlesheets4 uses)
+
     if (!requireNamespace("gargle", quietly = TRUE)) {
       warning("gargle package not available; cannot create calendar event")
-      return(NULL)
+      return(list(id = NULL, status = NA_integer_, body = NULL, error = "Missing gargle"))
     }
-    
-    # Authenticate with Calendar API scopes
+
     token <- gargle::token_fetch(
       scopes = GS_SCOPES,
       path = GS_SERVICE_JSON
     )
-    
     if (is.null(token)) {
       warning("Could not obtain access token for Calendar API")
-      return(NULL)
+      return(list(id = NULL, status = NA_integer_, body = NULL, error = "No access token"))
     }
-    
-    # Format times for Calendar API (RFC3339 with timezone)
+
     start_rfc <- format(lubridate::with_tz(started_at, tzone = TIMEZONE), "%Y-%m-%dT%H:%M:%S")
-    end_rfc <- format(lubridate::with_tz(ended_at, tzone = TIMEZONE), "%Y-%m-%dT%H:%M:%S")
-    
-    # Calendar API endpoint
-    url <- paste0("https://www.googleapis.com/calendar/v3/calendars/", 
-                  httr::url_encode(calendar_id), "/events")
-    
-    # Event payload (Calendar API expects dateTime + timeZone separately)
+    end_rfc   <- format(lubridate::with_tz(ended_at,   tzone = TIMEZONE), "%Y-%m-%dT%H:%M:%S")
+
+    url <- paste0("https://www.googleapis.com/calendar/v3/calendars/", httr::url_encode(calendar_id), "/events")
     event_body <- list(
       summary = paste0(routine_name, " - Practice"),
       start = list(dateTime = start_rfc, timeZone = TIMEZONE),
-      end = list(dateTime = end_rfc, timeZone = TIMEZONE)
+      end   = list(dateTime = end_rfc,   timeZone = TIMEZONE)
     )
-    
-    # Make API request using token's credentials
+
     auth_header <- paste("Bearer", token$credentials$access_token)
     resp <- httr::POST(
       url,
@@ -127,25 +117,26 @@ create_calendar_event <- function(entry_id, routine_name, started_at, ended_at, 
       httr::content_type_json(),
       body = jsonlite::toJSON(event_body, auto_unbox = TRUE)
     )
-    
-    if (httr::status_code(resp) >= 400) {
-      error_content <- httr::content(resp, as = "text")
-      warning(paste0("Calendar API error (", httr::status_code(resp), "): ", error_content))
-      return(NULL)
+
+    sc <- httr::status_code(resp)
+    body_txt <- tryCatch(httr::content(resp, as = "text", encoding = "UTF-8"), error = function(e) "<no body>")
+    if (sc >= 400) {
+      warning(paste0("Calendar API error (", sc, "): ", body_txt))
+      return(list(id = NULL, status = sc, body = body_txt, error = paste0("Calendar API error ", sc)))
     }
-    
-    event_data <- httr::content(resp, as = "parsed")
-    if (is.null(event_data$id)) {
+
+    parsed <- tryCatch(httr::content(resp, as = "parsed"), error = function(e) NULL)
+    ev_id <- if (!is.null(parsed)) parsed$id else NULL
+    if (is.null(ev_id)) {
       warning("Calendar event created but no event ID returned")
-      return(NULL)
+      return(list(id = NULL, status = sc, body = body_txt, error = "No event id"))
     }
-    
-    return(event_data$id)
+
+    list(id = ev_id, status = sc, body = body_txt, error = NULL)
   }, error = function(e) {
-    err_msg <- paste0("Failed to create calendar event: ", e$message, 
-                     " (Calendar ID: ", calendar_id, ")")
+    err_msg <- paste0("Failed to create calendar event: ", e$message, " (Calendar ID: ", calendar_id, ")")
     warning(err_msg)
-    return(NULL)
+    list(id = NULL, status = NA_integer_, body = NULL, error = err_msg)
   })
 }
 
@@ -550,20 +541,20 @@ server <- function(input, output, session) {
     cal_id <- resolve_user_calendar_id(state$user_id)
     if (nzchar(cal_id)) {
       routine_name <- state$routines %>% filter(.data$routine_id == state$selected_routine) %>% pull(.data$routine_name) %>% dplyr::first()
-      tryCatch({
-        cal_event_id <- create_calendar_event(
+      res <- tryCatch({
+        create_calendar_event(
           state$entry_id,
           routine_name %||% "Practice",
           state$started_at,
           ended_at,
           cal_id
         )
-        if (is.null(cal_event_id)) {
-          showNotification("Calendar event creation failed (check logs)", type = "warning", duration = 3)
-        }
-      }, error = function(e) {
-        showNotification(paste0("Calendar error: ", e$message), type = "warning", duration = 5)
-      })
+      }, error = function(e) list(id = NULL, status = NA_integer_, body = NULL, error = e$message))
+      if (!is.null(res$id)) {
+        cal_event_id <- res$id
+      } else {
+        showNotification(paste0("Calendar failed (", res$error %||% "unknown", ")"), type = "warning", duration = 5)
+      }
     } else {
       message("No calendar ID found for user ", state$user_id, "; skipping calendar event")
     }
