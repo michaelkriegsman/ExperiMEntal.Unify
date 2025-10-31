@@ -268,10 +268,9 @@ server <- function(input, output, session) {
       q$user %||% DEFAULT_USER_ID
     }, error = function(e) DEFAULT_USER_ID)
     state$user_id <- u
-    output$user_label <- renderText(u)
+    output$user_label <- renderText(if (is.null(u) || !nzchar(u)) "Guest" else u)
     
-    # Check for incomplete session after user is set
-    # DISABLED for now - re-enable when resume functionality is tested
+    # Check for incomplete session after user is set (disabled for now)
     # later(function() {
     #   tryCatch({
     #     incomplete <- check_incomplete_session(state$user_id)
@@ -279,7 +278,6 @@ server <- function(input, output, session) {
     #       state$incomplete_session <- incomplete
     #     }
     #   }, error = function(e) {
-    #     # Silently fail - incomplete session check is optional
     #     message("Could not check for incomplete session: ", e$message)
     #   })
     # }, delay = 0.5)

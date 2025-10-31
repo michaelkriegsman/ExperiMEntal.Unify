@@ -2,7 +2,7 @@
 
 # TODO: set these before running
 SHEET_ID <- Sys.getenv("MPB_SHEET_ID", unset = "1QfHPiVyOVk5XrFloDKznoivLHMTtBI5F0fY0TsgykuE")
-DEFAULT_USER_ID <- Sys.getenv("MPB_DEFAULT_USER_ID", unset = "Michael.Test")
+DEFAULT_USER_ID <- Sys.getenv("MPB_DEFAULT_USER_ID", unset = "")
 DEFAULT_CALENDAR_ID <- Sys.getenv("MPB_DEFAULT_CALENDAR_ID", unset = "")
 TIMEZONE <- Sys.getenv("MPB_TIMEZONE", unset = "America/New_York")
 DEMO_USER_ID <- Sys.getenv("MPB_DEMO_USER_ID", unset = "Demo")
