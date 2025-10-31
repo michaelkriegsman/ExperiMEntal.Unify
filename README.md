@@ -13,7 +13,8 @@ A focused Shiny module for “Manual Practice” sessions: launch a routine, tog
 - Default blank user loads as `Guest`; pass `?user=<id>` to select a user
 - Diagnostics removed from UI for a clean experience
 - Google Calendar integration via service account
-  - On Complete & Save, creates an event using the user’s `google_calendar_id` (or default)
+  - On Complete & Save, creates an event using the user's `google_calendar_id` from `users` sheet
+  - Calendar routing correctly matches each user to their own calendar (no hardcoding)
   - Event description includes only performed steps in submission order with per‑step durations (mm:ss) and total minutes
 - Deployed to shinyapps.io
   - Live: https://l9edvk-michael0a0kriegsman.shinyapps.io/experimental_app/
@@ -40,10 +41,14 @@ R -q -e "shiny::runApp('.', host='127.0.0.1', port=3840)"
 - Script: `Deploy_ManualPracticeBeta.R` (uses `rsconnect::deployApp`).
 
 ## Today's changes (summary)
+- **Fixed calendar routing bug**: Calendar events now correctly route to each user's calendar (not hardcoded to Michael.Test)
+  - Filter out invalid NA/empty user rows before matching
+  - Added comprehensive debugging/logging for calendar resolution
 - **Timezone strategy implemented**: All timestamps stored in UTC; displayed/used in user's timezone
   - Added `timezone` column support in `users` sheet (per-user timezone)
   - Helper functions: `store_timestamp_utc()`, `display_timestamp_local()`, `get_user_timezone()`
   - Calendar events show at user's local time (subjective experience)
+  - Fixed 4-hour timezone offset by ensuring all timestamps stored as UTC
   - See `HOWTO/timezone_strategy.md` for full strategy documentation
 - Stabilized ended_at updates and step matching; removed reliance on full-row rewrites
 - Switched session grouping to `entry_id` throughout
@@ -57,33 +62,35 @@ R -q -e "shiny::runApp('.', host='127.0.0.1', port=3840)"
 - Unified repo setup and pushes via SSH remote
 
 ## Next steps (prioritized)
-1. Reliability polish (P0)
-   - Debounce rapid toggle ON/OFF flickers to avoid duplicate row writes
-   - Guard against intermittent Sheets latency; retry range updates on OFF
-   - Ensure description always reflects the latest writes (consider 200–400ms wait before read)
-2. Data shape + schema hygiene (P0)
-   - Audit for any lingering `entry_group_id` references; remove entirely
-   - Confirm headers match `schema_headers.md` in all code paths
-3. Calendar robustness (P0) — **DONE**
-   - ✅ Per-user timezone override (from `users` sheet); verified event TZ
-   - Optional: add location or custom title suffix from routine metadata
-4. UI improvements (P1)
-   - Persist per-step elapsed mm:ss across resume (init from existing row)
-   - Add subtle visual feedback on successful OFF write (e.g., checkmark)
-   - Keyboard shortcuts for quick toggles (if desired)
-5. Session resume after disconnect (P2 - Future feature)
+1. **Session resume after disconnect (P0 - Priority)**
    - On app load, detect incomplete sessions from `practice_entries` sheet
    - Display "Resume" button instead of "Launch Routine" when incomplete session found
    - Restore all timers: routine elapsed continues ticking, step timers show frozen time if OFF or continue if ON
+   - Reconstruct state from existing rows (entry_id, started_at, step ON/OFF states from timestamps)
    - Architecture supports this via timestamps, but requires careful state reconstruction
-   - **Note:** This is a complex feature and will be tackled as a separate project
-6. Performance (P1)
+   - **Status:** Infrastructure exists (`check_incomplete_session` function), needs UI and state restoration logic
+2. Calendar robustness (P0) — **DONE**
+   - ✅ Per-user timezone override (from `users` sheet); verified event TZ
+   - ✅ Calendar routing to correct user's calendar (fixed filter bug)
+   - Optional: add location or custom title suffix from routine metadata
+3. Reliability polish (P1)
+   - Debounce rapid toggle ON/OFF flickers to avoid duplicate row writes
+   - Guard against intermittent Sheets latency; retry range updates on OFF
+   - Ensure description always reflects the latest writes (consider 200–400ms wait before read)
+4. Data shape + schema hygiene (P1)
+   - Audit for any lingering `entry_group_id` references; remove entirely
+   - Confirm headers match `schema_headers.md` in all code paths
+5. UI improvements (P1)
+   - Persist per-step elapsed mm:ss across resume (init from existing row)
+   - Add subtle visual feedback on successful OFF write (e.g., checkmark)
+   - Keyboard shortcuts for quick toggles (if desired)
+6. Performance (P2)
    - Cache static tabs (`routines`, `routine_steps`) per session; invalidate on demand
    - Batch writes if a user toggles multiple steps quickly
-7. Observability (P1)
+7. Observability (P2)
    - Add optional verbose logging toggle in UI (dev only)
    - Structured log lines for writes/updates (row id, step, time)
-8. Security and secrets (P1)
+8. Security and secrets (P2)
    - Centralize secrets handling for shinyapps.io (env vars only; avoid absolute paths)
    - Document rotation steps in HOWTO
 9. Testing + QA (P2)
