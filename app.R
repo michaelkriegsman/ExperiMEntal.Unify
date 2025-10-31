@@ -5,7 +5,7 @@ suppressPackageStartupMessages({
   library(lubridate)
   library(later)
   library(shinyWidgets)
-  # library(googleCalendarR)  # not required at load; functions are called via namespace
+  # Using Calendar API directly via httr instead of googleCalendarR (package compatibility)
 })
 
 # Ensure a default CRAN mirror is set for install.packages to avoid prompt errors
@@ -28,7 +28,7 @@ ensure_pkg <- function(pkg) {
   x
 }
 
-invisible(lapply(c("shiny", "googlesheets4", "dplyr", "lubridate", "httr", "jsonlite", "shinyWidgets", "googleCalendarR"), ensure_pkg))
+invisible(lapply(c("shiny", "googlesheets4", "dplyr", "lubridate", "httr", "jsonlite", "shinyWidgets"), ensure_pkg))
 
 # Auth: prefer service account if available; otherwise deauth (public sheets only)
 # Includes both Sheets and Calendar scopes for full functionality
@@ -68,16 +68,15 @@ write_append_entries <- function(df) {
   googlesheets4::sheet_append(SHEET_ID, data = df, sheet = TAB_ENTRIES)
 }
 
-# Create Google Calendar event for completed practice session
+# Create Google Calendar event for completed practice session (using Calendar API directly via httr)
 create_calendar_event <- function(entry_id, routine_name, started_at, ended_at, calendar_id = DEFAULT_CALENDAR_ID) {
   if (is.null(calendar_id) || !nzchar(calendar_id)) {
     message("No calendar ID configured, skipping calendar event creation")
     return(NULL)
   }
   
-  # Ensure package is available
-  if (!requireNamespace("googleCalendarR", quietly = TRUE)) {
-    warning("googleCalendarR package not available; cannot create calendar event")
+  if (!requireNamespace("httr", quietly = TRUE) || !requireNamespace("jsonlite", quietly = TRUE)) {
+    warning("httr/jsonlite not available; cannot create calendar event")
     return(NULL)
   }
   
@@ -88,25 +87,59 @@ create_calendar_event <- function(entry_id, routine_name, started_at, ended_at, 
       return(NULL)
     }
     
-    # Authenticate for Calendar API (separate from Sheets auth)
-    googleCalendarR::gc_auth(path = GS_SERVICE_JSON, scopes = GS_SCOPES)
+    # Get access token using service account
+    token <- googlesheets4::gs4_token()  # Reuse existing token if available
+    if (is.null(token)) {
+      # Re-authenticate if needed
+      googlesheets4::gs4_auth(path = GS_SERVICE_JSON, scopes = GS_SCOPES)
+      token <- googlesheets4::gs4_token()
+    }
     
-    # Create event - ensure times are in correct format
-    event <- googleCalendarR::gc_event(
+    if (is.null(token)) {
+      warning("Could not obtain access token for Calendar API")
+      return(NULL)
+    }
+    
+    # Format times for Calendar API (RFC3339)
+    start_rfc <- format(started_at, "%Y-%m-%dT%H:%M:%S%z")
+    end_rfc <- format(ended_at, "%Y-%m-%dT%H:%M:%S%z")
+    # Ensure timezone format is correct (e.g., -0500 not -05:00)
+    if (nchar(start_rfc) == 20) start_rfc <- paste0(substr(start_rfc, 1, 19), "+00:00")
+    if (nchar(end_rfc) == 20) end_rfc <- paste0(substr(end_rfc, 1, 19), "+00:00")
+    
+    # Calendar API endpoint
+    url <- paste0("https://www.googleapis.com/calendar/v3/calendars/", 
+                  httr::url_encode(calendar_id), "/events")
+    
+    # Event payload
+    event_body <- list(
       summary = paste0(routine_name, " - Practice"),
-      start = started_at,
-      end = ended_at,
-      calendarId = calendar_id
+      start = list(dateTime = start_rfc, timeZone = TIMEZONE),
+      end = list(dateTime = end_rfc, timeZone = TIMEZONE)
     )
     
-    if (is.null(event) || is.null(event$id)) {
+    # Make API request
+    resp <- httr::POST(
+      url,
+      httr::add_headers(Authorization = paste("Bearer", token$credentials$access_token)),
+      httr::content_type_json(),
+      body = jsonlite::toJSON(event_body, auto_unbox = TRUE)
+    )
+    
+    if (httr::status_code(resp) >= 400) {
+      error_content <- httr::content(resp, as = "text")
+      warning(paste0("Calendar API error (", httr::status_code(resp), "): ", error_content))
+      return(NULL)
+    }
+    
+    event_data <- httr::content(resp, as = "parsed")
+    if (is.null(event_data$id)) {
       warning("Calendar event created but no event ID returned")
       return(NULL)
     }
     
-    return(event$id)
+    return(event_data$id)
   }, error = function(e) {
-    # More detailed error message for debugging
     err_msg <- paste0("Failed to create calendar event: ", e$message, 
                      " (Calendar ID: ", calendar_id, ")")
     warning(err_msg)
