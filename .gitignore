@@ -21,6 +21,8 @@ rsconnect/
 *.pem
 *service*.json
 *credentials*.json
+# Note: august-storm*.json is needed for deployment but should not be in git
+# Keep it locally and deploy script will bundle it
 *august-storm*.json
 
 # Build / misc

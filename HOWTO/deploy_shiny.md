@@ -19,15 +19,27 @@ rsconnect::setAccountInfo(
 ```
 
 ## Deploy
-From the repo root (or the module directory):
+
+**If you're at max apps on shinyapps.io:** Update an existing app instead:
+```r
+rsconnect::deployApp(
+  appDir = ".",
+  appName = "experimental_app",  # existing app name
+  account = "l9edvk-michael0a0kriegsman",
+  forceUpdate = TRUE
+)
+```
+
+**Otherwise, create new:**
 ```r
 rsconnect::deployApp("Manual_Practice_Beta", forceUpdate = TRUE)
 ```
 
 ## Environment/config
+- **Service account JSON**: Copy the JSON file into the app directory before deploying. It gets bundled automatically. The file is gitignored but needed for deployment.
 - The app reads `config.R` in the module. For non-interactive access, set env vars on shinyapps.io:
-  - `MPB_SHEET_ID` — Google Sheet ID
-  - `MPB_GS_SERVICE_JSON` — path to the service account JSON inside the bundle (if you include it), or use a secure alternative (e.g., s3)
+  - `MPB_SHEET_ID` — Google Sheet ID  
+  - `MPB_GS_SERVICE_JSON` — path relative to app bundle (e.g., "august-storm-464819-q7-c26ff636dc17.json")
   - `MPB_DEFAULT_USER_ID`, `MPB_TIMEZONE`, etc.
 
 ## Sharing

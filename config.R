@@ -14,10 +14,19 @@ TAB_STEPS <- "routine_steps"
 TAB_ENTRIES <- "practice_entries"
 
 # Optional service account auth for Google Sheets
-# Set MPB_GS_SERVICE_JSON to an absolute path to your service account JSON to enable non-interactive access
-GS_SERVICE_JSON <- Sys.getenv(
-  "MPB_GS_SERVICE_JSON",
-  unset = "/Users/mak/Library/CloudStorage/GoogleDrive-kriegsman.1@gmail.com/My Drive/ExperiMEntal/ExperiMEntal Backend/ExperiMEntal/august-storm-464819-q7-c26ff636dc17.json"
-)
+# For local: absolute path works
+# For shinyapps.io: set MPB_GS_SERVICE_JSON env var pointing to a file inside the app bundle
+# For now, try relative path first, then fall back to env var or absolute path
+GS_SERVICE_JSON <- Sys.getenv("MPB_GS_SERVICE_JSON", unset = "")
+if (!nzchar(GS_SERVICE_JSON)) {
+  # Try relative path from app directory
+  rel_path <- "august-storm-464819-q7-c26ff636dc17.json"
+  abs_path <- "/Users/mak/Library/CloudStorage/GoogleDrive-kriegsman.1@gmail.com/My Drive/ExperiMEntal/ExperiMEntal Backend/ExperiMEntal/august-storm-464819-q7-c26ff636dc17.json"
+  if (file.exists(rel_path)) {
+    GS_SERVICE_JSON <- normalizePath(rel_path)
+  } else if (file.exists(abs_path)) {
+    GS_SERVICE_JSON <- abs_path
+  }
+}
 
 
