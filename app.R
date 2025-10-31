@@ -69,7 +69,7 @@ write_append_entries <- function(df) {
 }
 
 # Create Google Calendar event for completed practice session
-create_calendar_event <- function(entry_group_id, routine_name, started_at, ended_at, calendar_id = DEFAULT_CALENDAR_ID) {
+create_calendar_event <- function(entry_id, routine_name, started_at, ended_at, calendar_id = DEFAULT_CALENDAR_ID) {
   if (is.null(calendar_id) || !nzchar(calendar_id)) {
     message("No calendar ID configured, skipping calendar event creation")
     return(NULL)
@@ -94,6 +94,19 @@ create_calendar_event <- function(entry_group_id, routine_name, started_at, ende
     message("Failed to create calendar event: ", e$message)
     return(NULL)
   })
+}
+
+# Resolve calendar id for current user (sheet override > default)
+resolve_user_calendar_id <- function(user_id) {
+  if (is.null(user_id)) return(DEFAULT_CALENDAR_ID)
+  cal <- tryCatch({
+    users <- read_sheet_safe(TAB_USERS)
+    row <- users %>% dplyr::filter(.data$user_id == user_id) %>% dplyr::slice(1)
+    if (nrow(row) == 0) return(DEFAULT_CALENDAR_ID)
+    val <- as.character(row$google_calendar_id)
+    if (length(val) == 0 || is.na(val) || val == "") DEFAULT_CALENDAR_ID else val
+  }, error = function(e) DEFAULT_CALENDAR_ID)
+  cal
 }
 
 # Helper: convert 1-based column index to Excel letter(s)
@@ -479,16 +492,17 @@ server <- function(input, output, session) {
     if (is.na(total_sec) || total_sec < 0) total_sec <- 0
     total_min <- round(total_sec / 60, 2)
 
-    # Create Google Calendar event if calendar ID is configured
+    # Create Google Calendar event if calendar ID is configured (user override > default)
     cal_event_id <- NA
-    if (nzchar(DEFAULT_CALENDAR_ID)) {
-      routine_name <- state$routines %>% filter(.data$routine_id == state$selected_routine) %>% pull(.data$routine_name) %>% first()
+    cal_id <- resolve_user_calendar_id(state$user_id)
+    if (nzchar(cal_id)) {
+      routine_name <- state$routines %>% filter(.data$routine_id == state$selected_routine) %>% pull(.data$routine_name) %>% dplyr::first()
       cal_event_id <- create_calendar_event(
         state$entry_id,
         routine_name %||% "Practice",
         state$started_at,
         ended_at,
-        DEFAULT_CALENDAR_ID
+        cal_id
       )
     }
     
