@@ -16,6 +16,7 @@ A focused Shiny module for “Manual Practice” sessions: launch a routine, tog
   - On Complete & Save, creates an event using the user's `google_calendar_id` from `users` sheet
   - Calendar routing correctly matches each user to their own calendar (no hardcoding)
   - Event description includes only performed steps in submission order with per‑step durations (mm:ss) and total minutes
+  - Enhanced error handling: clear notifications for missing calendar IDs and detailed API error messages
 - Deployed to shinyapps.io
   - Live: https://l9edvk-michael0a0kriegsman.shinyapps.io/experimental_app/
 
@@ -41,6 +42,11 @@ R -q -e "shiny::runApp('.', host='127.0.0.1', port=3840)"
 - Script: `Deploy_ManualPracticeBeta.R` (uses `rsconnect::deployApp`).
 
 ## Today's changes (summary)
+- **Enhanced calendar error handling and debugging**:
+  - Improved error messages with HTTP status codes and Google API error details
+  - Clear notifications when calendar ID is missing: "No calendar configured for user 'X'. Add google_calendar_id to users sheet."
+  - Detailed console logging for troubleshooting calendar event creation
+  - Parses and displays Google Calendar API error messages in user-friendly format
 - **Fixed calendar routing bug**: Calendar events now correctly route to each user's calendar (not hardcoded to Michael.Test)
   - Filter out invalid NA/empty user rows before matching
   - Added comprehensive debugging/logging for calendar resolution
@@ -72,6 +78,7 @@ R -q -e "shiny::runApp('.', host='127.0.0.1', port=3840)"
 2. Calendar robustness (P0) — **DONE**
    - ✅ Per-user timezone override (from `users` sheet); verified event TZ
    - ✅ Calendar routing to correct user's calendar (fixed filter bug)
+   - ✅ Enhanced error handling and user notifications for calendar setup issues
    - Optional: add location or custom title suffix from routine metadata
 3. Reliability polish (P1)
    - Debounce rapid toggle ON/OFF flickers to avoid duplicate row writes
